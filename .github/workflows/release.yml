@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. 1.2.3) — used when running manually"
+        required: true
+        default: "0.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        rid: [win-x64, win-x86, win-arm64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $v = $env:GITHUB_REF -replace "^refs/tags/v", ""
+          } else {
+            $v = "${{ github.event.inputs.version }}"
+          }
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Publish (${{ matrix.rid }})
+        run: >
+          dotnet publish FL.DriveMapper/FL.DriveMapper.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -p:AssemblyVersion=${{ steps.ver.outputs.version }}.0
+          -p:FileVersion=${{ steps.ver.outputs.version }}.0
+          -o publish/${{ matrix.rid }}
+
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          $stage = "stage/${{ matrix.rid }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "publish/${{ matrix.rid }}/FL.DriveMapper.exe" $stage
+          Copy-Item "publish/${{ matrix.rid }}/DriveMappings.xml" $stage
+          Copy-Item "TaskSchedulerSetting.xml" $stage
+          Copy-Item "README.md" $stage
+          Copy-Item "LICENSE" $stage
+
+      - name: Zip artifact
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "stage/${{ matrix.rid }}/*" -DestinationPath "FL.DriveMapper-${{ steps.ver.outputs.version }}-${{ matrix.rid }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FL.DriveMapper-${{ matrix.rid }}
+          path: FL.DriveMapper-${{ steps.ver.outputs.version }}-${{ matrix.rid }}.zip
+
+  release:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
